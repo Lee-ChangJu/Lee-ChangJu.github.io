@@ -1,0 +1,452 @@
+---
+title: "Filer Status"
+format: html
+editor: source
+author: CJ/IDG
+---
+
+```{r}
+#| include: false
+library(dplyr, warn.conflicts = FALSE)
+library(DBI)
+library(ggplot2)
+library(dbplyr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+library(gt)
+```
+
+```{r}
+#| include: false
+pg <- dbConnect(RPostgres::Postgres(), 
+                bigint = "integer", 
+                check_interrupts = TRUE)
+
+msf <- tbl(pg, sql("SELECT * FROM crsp.msf")) # For public float
+dsf <- tbl(pg, sql("SELECT * FROM crsp.dsf")) 
+filer <- tbl(pg, sql("SELECT * FROM audit.accfiler")) # For filer Status
+funda <- tbl(pg, sql("SELECT * FROM comp.funda")) # For revenue
+ccmxpf_lnkhist <- tbl(pg, sql("SELECT * FROM crsp.ccmxpf_lnkhist")) 
+comphist <- tbl(pg, sql("SELECT * FROM crsp.comphist"))
+```
+
+```{r}
+#| include: false
+### filer status ###
+
+fstatus <-
+  filer |>
+  select(company_fkey, form_fkey, pe_date, file_date, hst_is_accel_filer,
+         hst_is_large_accel, hst_is_small_report, matchqu_tso_markcap) |>
+  filter(file_date >= "2018-01-01", form_fkey == "10-K")
+
+## There are duplicate data because of 'accel_filer_key' (eg, company_fkey == "0001083199") -> Need to check what it means -> Trust? -> Solved
+```
+
+```{r}
+#| include: false
+### Link (CIK -> gvkey) ###
+
+gvkey_cik_link <-
+  comphist |> 
+  filter(!is.na(hcik)) |>
+  group_by(gvkey) |>
+  window_order(hchgdt) |>
+  mutate(new_cik = as.integer(row_number()==1L | hcik != lag(hcik)),
+         cik_id = cumsum(new_cik)) |>
+  group_by(gvkey, hcik, cik_id) |>
+  summarize(missing_hchgenddt = any(is.na(hchgenddt), na.rm = TRUE),
+            hchgdt = min(hchgdt, na.rm = TRUE),
+            hchgenddt = max(hchgenddt, na.rm = TRUE),
+            .groups = "drop") |>
+  mutate(hchgenddt = if_else(missing_hchgenddt, NA, hchgenddt)) |>
+  select(-missing_hchgenddt, -cik_id) |>
+  rename(cik = hcik) |>
+  mutate(hchgdt = if_else(hchgdt == min(hchgdt), as.Date(-Inf), hchgdt),
+         hchgenddt = if_else(is.na(hchgenddt), as.Date(Inf), hchgenddt)) 
+```
+
+```{r}
+#| include: false
+### Create revenue table ###
+
+
+funda_mod <-
+  funda |>
+  filter(indfmt == "INDL", datafmt == "STD",
+         consol == "C", popsrc == "D") |>
+  filter(fyear >= "2017") |>
+  rename(pe_date = datadate) 
+```
+
+```{r}
+#| include: false
+### compute 2Q public float ###
+
+mktcap <- 
+  msf |> 
+  mutate(mktcap = round(abs(prc) * shrout/1000.0), 2) |> # filer status is determined based on a public float of the last business day of the issuer’s most recently completed second fiscal quarter
+  select(permco, permno, date, mktcap) |>
+  filter(date >= "2017-01-01") |>
+  mutate(date = as.Date(date)) |>
+  mutate(fyear = year(date)) |>
+  mutate(month = month(date)) |>
+  group_by(permco, fyear, month) |> 
+  filter(date == max(date)) |> #end of month
+  ungroup() |>
+  select(fyear, month, date, permco, permno, mktcap)
+
+```
+
+```{r}
+#| include: false
+### Link (lpermco -> gvkey) ###
+
+
+ccm_link <-
+  ccmxpf_lnkhist |>
+  filter(linktype %in% c("LC", "LU", "LS"),
+         linkprim %in% c("C", "P")) |>
+  mutate(linkenddt = coalesce(linkenddt, max(linkenddt, na.rm = TRUE))) |>
+  select(gvkey, lpermco, lpermno, linkdt, linkenddt)
+```
+
+```{r}
+#| include: false
+### Merging Table ###
+
+## Join 'gvkey' to 'filer status'
+fstatus2 <-
+  fstatus |>
+  rename(cik = company_fkey) |>
+  inner_join(gvkey_cik_link, 
+             join_by(cik,
+                     file_date >= hchgdt,
+                     file_date <= hchgenddt)) |>
+  select(-c(hchgdt, hchgenddt))
+
+## Merge 'filer status' and 'funda'
+fstatus3 <-
+  funda_mod |>
+  select(gvkey, pe_date, fyear, revt) |>
+  right_join(fstatus2, by = c("gvkey", "pe_date")) |>
+  left_join(ccm_link, 
+             join_by(gvkey, pe_date >= linkdt, pe_date <= linkenddt)) |>
+  select(-c(linkdt, linkenddt)) |>
+  
+  # filer status is determined based on a public float of the last business day of the issuer’s most recently completed second fiscal quarter
+  mutate(pfloat_month = month(pe_date)) |>
+  mutate(pfloat_2Q = case_when(pfloat_month == 12 ~ 6, #2Q
+                               pfloat_month == 11 ~ 5,
+                               pfloat_month == 10 ~ 4,
+                               pfloat_month == 9 ~ 3,
+                               pfloat_month == 8 ~ 2,
+                               pfloat_month == 7 ~ 1,
+                               pfloat_month == 6 ~ 12,
+                               pfloat_month == 5 ~ 11,
+                               pfloat_month == 4 ~ 10,
+                               pfloat_month == 3 ~ 9,
+                               pfloat_month == 2 ~ 8,
+                               pfloat_month == 1 ~ 7)) |>
+  
+  mutate(pfloat_year = if_else(pfloat_month == 6, fyear-1, fyear)) |> # Only June year-end is need to be -1
+  left_join(mktcap,
+            join_by(lpermno==permno,  pfloat_year == fyear, pfloat_2Q == month)) |>
+  
+  na.omit() |>
+  collect()
+
+```
+
+```{r}
+#| include: false
+### Duplicate data check ###
+
+fstatus3 |>
+  group_by(cik, file_date) |>
+  count() |>
+  filter(n > 1) #This is because of the restatement, or the firm has more than one filer key
+
+## Use the 'matchqu_tso_date (total shares outstanding market cap)' to find normal 10_K report except restatements.
+fstatus4 <-
+  fstatus3 |>
+  filter(!is.na(matchqu_tso_markcap)) |>  # The restatement does not have 'matchqu_tso_markcap'
+                                          # Still have nine firs. Just remove those firms.
+                                          # Use the latest pe_date!
+
+  arrange(cik, file_date, desc(pe_date)) |>
+  group_by(cik, file_date) |>
+  filter(row_number() == 1)
+
+## Check again
+fstatus4 |>
+  group_by(cik, file_date) |>
+  count() |>
+  filter(n > 1) |>
+  ungroup() # Excellent!
+```
+
+### How many firms changed their filer status?
+```{r}
+#| include: false
+### Switchers ###
+
+## Pre-period
+pre_period <-
+  fstatus4 |> 
+  filter(file_date < "2020-04-27") |> # The final amendments, which are summarized below, become effective on April 27, 2020, and apply to any annual report filing due on or after the effective date.
+  group_by(gvkey) |>
+  filter(file_date == max(file_date, na.rm = TRUE)) |> # the latest report in pre-period
+  ungroup() |>
+  mutate(pre_accel_filer = hst_is_accel_filer > 0) |>
+  select(gvkey, pe_date, file_date, pre_accel_filer, mktcap) |>
+  rename(pre_pe_date = pe_date, pre_file_date = file_date, pre_mktcap = mktcap) # pre_mktcap is added
+
+
+## Merge with Post-period
+post_period <-
+  pre_period |>
+  left_join(fstatus4, by = join_by(gvkey, pre_file_date < file_date)) |> # to keep 'pre_accel_file', left_join is used.
+  mutate(pfloat = case_when(mktcap < 75 ~ "1) below 75",
+                            mktcap >= 75 & mktcap <= 700 ~ "2) between 75 and 700",
+                            mktcap > 700 ~ "3) above 700")) |>
+  mutate(post_accel_filer = hst_is_accel_filer > 0,
+         change_status = post_accel_filer != pre_accel_filer) |>
+  filter(!is.na(fyear)) # No matching data
+```
+
+```{r}
+#| echo=FALSE
+## Plot
+pivot <-
+  post_period |>
+  filter(!is.na(change_status), !is.na(pfloat)) |>
+  count(pre_accel_filer, pfloat, change_status) |>
+  mutate(seq = row_number()) |>
+  select(seq,everything())
+
+pivot |>
+  gt() |>
+  tab_header(title = "The number of observations")
+
+```
+
+
+#### 1. 'seq 2)' below 75: The firm has been switched from 'non' -\> 'acc'
+```{r}
+#| include: false
+post_period |>
+  filter(pre_accel_filer == "FALSE",
+         change_status == "TRUE",
+         pfloat == "1) below 75") 
+```
+
+-   [Issue: Even though 'pfloat' is below 75, why have these firms been switched 'acc'?]{.underline}
+
+    1\) 014112: pfloat is \$36,716,000 but they have check as 'acc'
+
+    -   [10K (2022)](https://www.sec.gov/ix?doc=/Archives/edgar/data/0000722572/000168316822006358/franklin_i10k-063022.htm)
+    -   [10K (2021)](https://www.sec.gov/Archives/edgar/data/722572/000168316821004563/franklin_10k-063021.htm)
+
+    2\) 018978: there is no tick and pfloat is \$26,794,876
+
+    -   [10K (2021)](https://www.sec.gov/Archives/edgar/data/1399520/000155837021003244/stks-20201231x10k.htm)
+    -   [10K (2020)](https://www.sec.gov/Archives/edgar/data/1399520/000155837020003189/stks-20191231x10k.htm)
+
+-   \[**Ian**: From "seq 2" and GVKEY 014112, you are right, accelerated filer and public float of \$36,716,000. But public float in the previous year (2021) was \$137,599,000. For some reason it's not an accelerated filer in 2021, but perhaps should've been. If it had been in 2021, that might've explained why it was in 2022. But for the other case, public float is \$233,409,937 in the relevant year. So no errors here, it seems.\]
+
+-   \[**CJ**: For GVKEY 014112 case, there was significant increase on their stock price in 2021 . Thus, as you mentioned, they should have been accelerated filer in 2021 and non-accelerated following year (moreover they received ICFR audits in 2021, meaning that they are an accelerated filer). I think this should be opposite.\] [NASDAQ: FKWL](https://www.google.com/finance/quote/FKWL:NASDAQ?window=5Y) For GVKEY 018978 case, I can still see \$26,794,876.
+
+-   \[**Ian**: It should be possible to scrape the public float data from SEC pretty easily in recent years due to use of XBRL.\]
+
+-   \[**CJ**: Thank you for your suggestion. I will review some postings to understand how to extract public float data from XBRL.\]
+
+-   \[**Ian**: Does the field "matchqu_tso_markcap" have anything to do with public float? I'd guess not, but I don't understand why Audit Analytics doesn't grab the public float number.\]
+
+-   \[**CJ**: To remove the restatements from my dataset, I use 'matchqu_tso_markcap' as a criterion, since the restatements do not contain 'matchqu_tso_markcap')\]
+
+#### 2. 'seq 4)' between 75 and 700: The firm has been switched from 'non' -\> 'acc'
+```{r}
+#| include: false
+post_period |>
+  filter(pre_accel_filer == "FALSE",
+         change_status == "TRUE",
+         pfloat == "2) between 75 and 700",
+         mktcap < 75) 
+```
+
+-   [Issue: Just check whether they had less than \$75 pfloat during the pre-priod and more than \$75 during the post]{.underline}
+
+    1\) There is no firm with a float below \$75M during the post-period -\> 'acc'
+
+    2\) There are some firms with a float above \$75M during the pre-period. But it may be because of inaccurate pfloat (mktcap)
+
+-   **-\> No Issues (Need to use true public float)**
+
+#### 3. 'seq 5)' above 700: The firm has been 'non' during the pre and post.
+```{r}
+#| include: false
+
+post_period |>
+  filter(pre_accel_filer == "FALSE",
+         change_status == "FALSE",
+         pfloat == "3) above 700") |> # despite pfloat is above 700, why these firm have been 'non''?
+                                      # 90 firms
+                                      # There are some firms with no pre_mktcap (most firms are Emerging growth company) -> delete
+  filter(!is.na(pre_mktcap))          # 12 firms
+
+```
+
+-   [Issue: Even though 'pfloat' is above 700, why are these firms 'non'?]{.underline}
+
+    1\) Some do not have a 'pre_mktcap'. I will remove these firms because a firm with no pre_mktcap is considered 'non' dueing the pre_period.
+
+    2\) After removing the firms without 'pre_mktcap', there are 12 firms left. Most of these are emerging growth companies, which are also exempt from SOX 404.
+
+    3\) \[Important\] The majority of these emerging growth companies are marked as 'non', even though their float exceeds \$75M. I believe they should be designated as 'accelerated' or 'large filers' when their float exceeds \$75M. I need to review this regulation
+
+-   **-\> Need to add code to remove the firm with no 'pre_mktcap'**
+
+-   **-\> Need to further explore the regulation on emerging growth companies**
+
+#### 4. 'seq 7)' below 75: The firm was switched to 'acc' status even though public float was less than \$75M
+```{r}
+#| include: false
+post_period |>
+  filter(pre_accel_filer == "TRUE",
+         change_status == "FALSE",
+         pfloat == "1) below 75") |>
+  
+  filter(mktcap < 60) |> # An issuer whose public float previously exceeded the $75 million initial threshold for accelerated filer status would become a non-accelerated filer if its public float fell below $60 million, or 80% of that initial threshold, as opposed to the current threshold of $50 million
+
+
+  select(mktcap, cik, file_date, lpermco, pfloat_year, pfloat_2Q, pre_mktcap)
+```
+
+-   [Issue: Even though 'pfloat' is less than \$75, why these firms have been still 'acc'?]{.underline}
+
+    1\) \[Important\] I have found that there are distinct entry and exit (or transition) thresholds. Notably, the exit threshold is set lower than the entry threshold. 2) "An issuer whose public float previously exceeded the \$75 million initial threshold for accelerated filer status would become a non-accelerated filer if its public float fell below \$60 million, or 80% of that initial threshold, as opposed to the current threshold of \$50 million". Please see the detail the table below.
+
+-   **-\> Need to further analysis. For potential entry firms = \$100 / for potential exit firms = \$80**
+
+-   **-\> For example, potential entry firms may have incentive to report their revenue just less than \$100M while potential exit firms may have incentive to report their revenue just less than \$80M (Need to further study)**
+
+-   **-\> I think the distinct entry and exit (or transition) thresholds could be interesting topic. ([p.51-54 'Final rule'](https://www.sec.gov/files/rules/final/2020/34-88365.pdf "Final rule"))**
+
+| Filer Status |   Entry   |   Exit    |
+|:------------:|:---------:|:---------:|
+|    large     | \> \$700M | \< \$560M |
+|     acc      | \> \$75M  | \< \$60M  |
+|     non      | \< \$75M  |           |
+
+| Revenue (SRC) |   Entry   |   Exit   |
+|:-------------:|:---------:|:--------:|
+|      acc      | \> \$100M | \< \$80M |
+|      non      | \< \$100M |          |
+
+#### 5. 'seq12)' above 700: The firm has been switched to 'non' despite having more than 700
+```{r}
+#| include: false
+post_period |>
+  filter(pre_accel_filer == "TRUE",
+         change_status == "TRUE",
+         pfloat == "3) above 700") |>
+
+  filter(revt >= 100) # It seems that  $100 was applied for revenue test
+
+```
+
+-   [Issue: Even though 'pfloat' is more than \$700, why these firms have been switched to 'non'?]{.underline}
+
+    1\) The actual float might be lower than the 'mktcap,' suggesting that the real public float could be under \$700 million in this group. Therefore, if those companies have less than \$100 million in revenue, they are classified as 'non-accelerated filers. Therfore, no issue.
+
+    2\) After filtering the firms with over \$100 million in revenue, there are three firms left (the firms with less than \$100 million in revenue could be 'non'. Thus, no issue). Each of these firms has less than \$700 million in public float and over \$100 million in revenue. Therefore, they should be categorized as 'ACC'. I will remove those three firms
+
+    -   [004093 (2020)](https://www.sec.gov/ix?doc=/Archives/edgar/data/0001326160/000132616021000063/duk-20201231.htm)
+    -   [175269 (2020)](https://www.sec.gov/Archives/edgar/data/1341766/000182912621001412/celsiusholdings_10k.htm)
+    -   [004367 (2021)](https://www.sec.gov/ix?doc=/Archives/edgar/data/0001603923/000160392322000051/wfrd-20211231.htm)
+
+-   \*\*-\> No Issue
+
+### Update data!
+
+#### 1. Update
+
+-   Based on the analysis above, I will update the dataset and show the final number of firms.
+
+```{r}
+post_amendment <-
+  post_period |>
+  filter(!gvkey %in% c(018978, 014112)) |> # from 'seq 2'
+  filter(!is.na(pre_mktcap)) |> # from 'seq 5'
+  filter(!gvkey %in% c(015582, 022817, 025348, 035255, 035280, 035091,
+                       032941, 033719, 035267)) |> # from 'seq 5'
+  filter(!gvkey %in% c(004093, 175269, 004367)) # from 'seq 12'
+
+```
+
+#### 2. The final number of firms
+
+```{r}
+#| echo=FALSE
+## Plot
+pivot_amendment <-
+  post_amendment |>
+  filter(!is.na(change_status), !is.na(pfloat)) |>
+  count(pre_accel_filer, pfloat, change_status) |>
+  mutate(seq = row_number()) |>
+  select(seq,everything())
+
+pivot_amendment |>
+  gt() |>
+  tab_header(title = "The number of observations")
+
+```
+
+#### 3-1. The number of potential exit firms
+
+```{r}
+#| echo=FALSE
+hist1 <-
+  post_amendment |>
+  filter(pre_accel_filer == "TRUE",
+         #change_status == "TRUE",
+         pfloat == "2) between 75 and 700") |> # potential entrant
+  filter(revt > 0 & revt <= 200)|> # by revenue
+  group_by(revt)
+
+  ggplot(hist1, aes(x=revt, fill = change_status)) +
+  geom_histogram(binwidth=1) +
+  geom_vline(aes(xintercept=100), linetype="dashed", color="blue", linewidth=0.5) +
+  scale_x_continuous(breaks = seq(0, 200, by =10)) +
+  facet_grid(change_status ~ .) +
+  labs(x="revenue")
+```
+
+-   As we can see in the plot above, there are many switchers below the threshold. This means that many firms actually have benefited from the 2020 amendment.
+-   I assume that \$100M is used for revenue test (not 80 transition threshold).
+-   To determine if there is any discontinuity around the threshold, I will narrow the revenue interval. I expect that if the manager has incentive to become 'NON', there are much more firm just below the threshold.
+
+#### 3-2. The number of potential exit firms
+ 
+```{r}
+#| echo=FALSE
+hist2 <-
+  post_amendment |>
+  filter(pre_accel_filer == "TRUE",
+         #change_status == "TRUE",
+         pfloat == "2) between 75 and 700") |> # potential entrant
+  filter(revt > 70 & revt <= 130)|> # by revenue
+  group_by(revt)
+
+  ggplot(hist2, aes(x=revt, fill = change_status)) +
+  geom_histogram(binwidth=1) +
+  geom_vline(aes(xintercept=100), linetype="dashed", color="blue", linewidth=0.5) +
+  scale_x_continuous(breaks = seq(0, 200, by =10)) +
+  facet_grid(change_status ~ .) +
+  labs(x="revenue")
+```
+
+-   It appears that there are more firms just below the threshold, but it is not a clear trend. Because I anticipated a significantly larger number of firms just below the threshold (e.g., 90-100), I am now wondering whether there is a discontinuity in this plot. Moreover, even if I can determine that there is a discontinuity, I also wonder whether I can argue that this is due to firms intentionally reporting their revenue just below the threshold.
