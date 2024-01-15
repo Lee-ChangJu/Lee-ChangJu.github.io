@@ -26,7 +26,7 @@ pg <- dbConnect(RPostgres::Postgres(),
 
 msf <- tbl(pg, sql("SELECT * FROM crsp.msf")) # For public float
 dsf <- tbl(pg, sql("SELECT * FROM crsp.dsf")) 
-filer <- tbl(pg, sql("SELECT * FROM audit.accfiler")) # For filer Status
+filer <- tbl(pg, sql("SELECT * FROM audit.feed16_accelerated_filer")) # For filer Status
 funda <- tbl(pg, sql("SELECT * FROM comp.funda")) # For revenue
 ccmxpf_lnkhist <- tbl(pg, sql("SELECT * FROM crsp.ccmxpf_lnkhist")) 
 comphist <- tbl(pg, sql("SELECT * FROM crsp.comphist"))
@@ -189,6 +189,7 @@ fstatus4 |>
 ```
 
 ### How many firms changed their filer status?
+
 ```{r}
 #| include: false
 ### Switchers ###
@@ -233,8 +234,8 @@ pivot |>
 
 ```
 
-
 #### 1. 'seq 2)' below 75: The firm has been switched from 'non' -\> 'acc'
+
 ```{r}
 #| include: false
 post_period |>
@@ -255,19 +256,28 @@ post_period |>
     -   [10K (2021)](https://www.sec.gov/Archives/edgar/data/1399520/000155837021003244/stks-20201231x10k.htm)
     -   [10K (2020)](https://www.sec.gov/Archives/edgar/data/1399520/000155837020003189/stks-20191231x10k.htm)
 
--   \[**Ian**: From "seq 2" and GVKEY 014112, you are right, accelerated filer and public float of \$36,716,000. But public float in the previous year (2021) was \$137,599,000. For some reason it's not an accelerated filer in 2021, but perhaps should've been. If it had been in 2021, that might've explained why it was in 2022. But for the other case, public float is \$233,409,937 in the relevant year. So no errors here, it seems.\]
+-   **Comments**
 
--   \[**CJ**: For GVKEY 014112 case, there was significant increase on their stock price in 2021 . Thus, as you mentioned, they should have been accelerated filer in 2021 and non-accelerated following year (moreover they received ICFR audits in 2021, meaning that they are an accelerated filer). I think this should be opposite.\] [NASDAQ: FKWL](https://www.google.com/finance/quote/FKWL:NASDAQ?window=5Y) For GVKEY 018978 case, I can still see \$26,794,876.
+<p style="color:green; margin-left: 30px;"> **Ian**: From "seq 2" and GVKEY 014112, you are right, accelerated filer and public float of $36,716,000. But public float in the previous year (2021) was $137,599,000. For some reason, it's not an accelerated filer in 2021, but perhaps should've been. If it had been in 2021, that might've explained why it was in 2022. But for the other case, public float is $233,409,937 in the relevant year. So no errors here, it seems.</p>
 
--   \[**Ian**: It should be possible to scrape the public float data from SEC pretty easily in recent years due to use of XBRL.\]
 
--   \[**CJ**: Thank you for your suggestion. I will review some postings to understand how to extract public float data from XBRL.\]
+<p style="color:orange; margin-left: 30px;"> **CJ**: For GVKEY 014112 case, there was significant increase on their stock price in 2021 . Thus, as you mentioned, they should have been accelerated filer in 2021 and non-accelerated following year (moreover they received ICFR audits in 2021, meaning that they are an accelerated filer). I think this should be opposite.\] [NASDAQ: FKWL](https://www.google.com/finance/quote/FKWL:NASDAQ?window=5Y) For GVKEY 018978 case, I can still see \$26,794,876. </p>
 
--   \[**Ian**: Does the field "matchqu_tso_markcap" have anything to do with public float? I'd guess not, but I don't understand why Audit Analytics doesn't grab the public float number.\]
 
--   \[**CJ**: To remove the restatements from my dataset, I use 'matchqu_tso_markcap' as a criterion, since the restatements do not contain 'matchqu_tso_markcap')\]
+<p style="color:green; margin-left: 30px;"> **Ian**: It should be possible to scrape the public float data from SEC pretty easily in recent years due to use of XBRL.</p>
+
+
+<p style="color:orange; margin-left: 30px;"> **CJ**: Thank you for your suggestion. I will review some postings to understand how to extract public float data from XBRL.</p>
+
+
+<p style="color:green; margin-left: 30px;"> **Ian**: Does the field "matchqu_tso_markcap" have anything to do with public float? I'd guess not, but I don't understand why Audit Analytics doesn't grab the public float number. </p>
+
+
+<p style="color:orange; margin-left: 30px;"> **CJ**: To remove the restatements from my dataset, I use 'matchqu_tso_markcap' as a criterion, since the restatements do not contain 'matchqu_tso_markcap') </p>
+
 
 #### 2. 'seq 4)' between 75 and 700: The firm has been switched from 'non' -\> 'acc'
+
 ```{r}
 #| include: false
 post_period |>
@@ -286,6 +296,7 @@ post_period |>
 -   **-\> No Issues (Need to use true public float)**
 
 #### 3. 'seq 5)' above 700: The firm has been 'non' during the pre and post.
+
 ```{r}
 #| include: false
 
@@ -312,6 +323,7 @@ post_period |>
 -   **-\> Need to further explore the regulation on emerging growth companies**
 
 #### 4. 'seq 7)' below 75: The firm was switched to 'acc' status even though public float was less than \$75M
+
 ```{r}
 #| include: false
 post_period |>
@@ -347,6 +359,7 @@ post_period |>
 |      non      | \< \$100M |          |
 
 #### 5. 'seq12)' above 700: The firm has been switched to 'non' despite having more than 700
+
 ```{r}
 #| include: false
 post_period |>
@@ -425,12 +438,11 @@ hist1 <-
   labs(x="revenue")
 ```
 
--   As we can see in the plot above, there are many switchers below the threshold. This means that many firms actually have benefited from the 2020 amendment.
--   I assume that \$100M is used for revenue test (not 80 transition threshold).
--   To determine if there is any discontinuity around the threshold, I will narrow the revenue interval. I expect that if the manager has incentive to become 'NON', there are much more firm just below the threshold.
+-   As we can see in the plot above, there are many switchers below the threshold. This means that many firms actually have benefited from the 2020 amendment. I assume that \$100M is used for revenue test (not 80 transition threshold).
+-   To determine if there is any discontinuity around the threshold, I will narrow the revenue interval. I expect that if the manager has incentive to become 'pre_accel_filer', there are much more firm just below the threshold.
 
 #### 3-2. The number of potential exit firms
- 
+
 ```{r}
 #| echo=FALSE
 hist2 <-
@@ -449,4 +461,4 @@ hist2 <-
   labs(x="revenue")
 ```
 
--   It appears that there are more firms just below the threshold, but it is not a clear trend. Because I anticipated a significantly larger number of firms just below the threshold (e.g., 90-100), I am now wondering whether there is a discontinuity in this plot. Moreover, even if I can determine that there is a discontinuity, I also wonder whether I can argue that this is due to firms intentionally reporting their revenue just below the threshold.
+-   It appears that there are more firms just below the threshold, but it is not a clear trend. I anticipated a significantly larger number of firms just below the threshold (e.g., 90-100), however, there are more firms between $70-90M. I do not believe that managers can reduce their revenue to less than $90M because it would be costly. Thus, I am now wondering whether there is a discontinuity in this plot. Moreover, even if I can determine that there is a discontinuity, I also wonder whether I can argue that this is due to firms intentionally reporting their revenue just below the threshold. This is because it could be natural that there are more switchers below the threshold ($100 revenue test).
